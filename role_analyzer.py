@@ -49,8 +49,8 @@ class RAState:
     label_keys.add(key)
     return labels(z3.StringVal(key)) == z3.StringVal(value)
 
-  # TODO: if I correctly change 'str' to 'set[str]' in the return type I get an weird error!
-  def labels_and_keys(self, entity_type: EntityType) -> tuple[z3.FuncDeclRef, str]:
+  # TODO: if I correctly change 'typing.Any' to 'set[str]' in the return type I get an weird error!
+  def labels_and_keys(self, entity_type: EntityType) -> tuple[z3.FuncDeclRef, typing.Any]:
     if entity_type == EntityType.APP:
       return self.app_labels, self.app_label_keys
     elif entity_type == EntityType.NODE:
@@ -540,7 +540,7 @@ def labels_as_z3_map(
     state : RAState,
     concrete_labels : typing.Optional[dict[str, str]],
     entity_type     : EntityType
-  ) -> tuple[z3.BoolRef, RAState]:
+  ) -> z3.BoolRef:
   logging.debug(f'Compiling labels {concrete_labels} for {entity_type.value}')
   if concrete_labels is not None:
     return z3.And([state.set(entity_type, key, value) for key, value in concrete_labels.items()])
