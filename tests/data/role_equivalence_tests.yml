@@ -1,4 +1,25 @@
 tests:
+  - name: Values mismatch
+    first-role:
+      kind: role
+      version: v4
+      metadata:
+        name: role1
+      spec:
+        allow:
+          node_labels:
+            'key' : 'v1'
+    second-role:
+      kind: role
+      version: v4
+      metadata:
+        name: role2
+      spec:
+        allow:
+          node_labels:
+            'key' : 'v2'
+    are-equivalent: False
+    is-template: False
   - name: Match any key value more restrictive than match any
     first-role:
       kind: role
