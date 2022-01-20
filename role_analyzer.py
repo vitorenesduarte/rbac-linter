@@ -358,7 +358,7 @@ def regex_to_z3_expr(regex : sre_parse.SubPattern) -> z3.ReRef:
 #
 def matches_value(
     labels : z3.FuncDeclRef,
-    key    : z3.SeqRef,
+    key    : str,
     value  : str
   ) -> z3.BoolRef:
   key = z3.StringVal(key)
