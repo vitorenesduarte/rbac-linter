@@ -1,12 +1,13 @@
 import argparse
 import logging
-from role_analyzer import allows
+from role_analyzer import allows, RAState
 import yaml
 from z3 import Distinct, Solver, sat, unsat # type: ignore
 
 def roles_are_equivalent(r1, r2) -> tuple[bool, str]:
-  r1 = allows(r1)
-  r2 = allows(r2)
+  state = RAState()
+  r1 = allows(state, r1)
+  r2 = allows(state, r2)
   s = Solver()
   s.add(Distinct(r1, r2))
   result = s.check()

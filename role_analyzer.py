@@ -7,29 +7,60 @@ import sre_parse
 import typing
 import z3 # type: ignore
 
-# Z3 Node Constants
-app_labels      = z3.Function('app_labels',       z3.StringSort(),  z3.StringSort())
-app_label_keys  = z3.Function('app_label_keys',   z3.StringSort(),  z3.BoolSort())
-node_labels     = z3.Function('node_labels',      z3.StringSort(),  z3.StringSort())
-node_label_keys = z3.Function('node_label_keys',  z3.StringSort(),  z3.BoolSort())
-k8s_labels      = z3.Function('k8s_labels',       z3.StringSort(),  z3.StringSort())
-k8s_label_keys  = z3.Function('k8s_label_keys',   z3.StringSort(),  z3.BoolSort())
-db_labels       = z3.Function('db_labels',        z3.StringSort(),  z3.StringSort())
-db_label_keys   = z3.Function('db_label_keys',    z3.StringSort(),  z3.BoolSort())
-entity_types = {
-  'app_labels'        : (app_labels,  app_label_keys),
-  'node_labels'       : (node_labels, node_label_keys),
-  'kubernetes_labels' : (k8s_labels,  k8s_label_keys),
-  'db_labels'         : (db_labels,   db_label_keys)
-}
 class EntityType(Enum):
-  APP   = (app_labels,  app_label_keys)
-  NODE  = (node_labels, node_label_keys)
-  K8S   = (k8s_labels,  k8s_label_keys)
-  DB    = (db_labels,   db_label_keys)
+  APP  = 'app_labels'
+  NODE = 'node_labels'
+  K8S  = 'kubernetes_labels'
+  DB   = 'db_labels'
 
 def other_entity_types(entity_type : EntityType) -> list[EntityType]:
   return list(filter(lambda e : e != entity_type, EntityType))
+
+ENTITY_TYPES = {EntityType.APP, EntityType.NODE, EntityType.K8S, EntityType.DB}
+
+@dataclass
+class RAState:
+  app_labels      : z3.FuncDeclRef
+  node_labels     : z3.FuncDeclRef
+  k8s_labels      : z3.FuncDeclRef
+  db_labels       : z3.FuncDeclRef
+  app_label_keys  : set[str]
+  node_label_keys : set[str]
+  k8s_label_keys  : set[str]
+  db_label_keys   : set[str]
+
+  def __init__(self):
+    self.app_labels  = z3.Function('app_labels',  z3.StringSort(), z3.StringSort())
+    self.node_labels = z3.Function('node_labels', z3.StringSort(), z3.StringSort())
+    self.k8s_labels  = z3.Function('k8s_labels',  z3.StringSort(), z3.StringSort())
+    self.db_labels   = z3.Function('db_labels',   z3.StringSort(), z3.StringSort())
+    self.app_label_keys = set()
+    self.node_label_keys = set()
+    self.k8s_label_keys = set()
+    self.db_label_keys = set()
+
+  def set(
+      self,
+      entity_type : EntityType,
+      key         : str,
+      value       : str
+    ) -> z3.ExprRef:
+    labels, label_keys = self.labels_and_keys(entity_type)
+    label_keys.add(key)
+    return labels(z3.StringVal(key)) == z3.StringVal(value)
+
+  # TODO: if I correctly change 'str' to 'set[str]' in the return type I get an weird error!
+  def labels_and_keys(self, entity_type: EntityType) -> tuple[z3.FuncDeclRef, str]:
+    if entity_type == EntityType.APP:
+      return self.app_labels, self.app_label_keys
+    elif entity_type == EntityType.NODE:
+      return self.node_labels, self.node_label_keys
+    elif entity_type == EntityType.K8S:
+      return self.k8s_labels, self.k8s_label_keys
+    elif entity_type == EntityType.DB:
+      return self.db_labels, self.db_label_keys
+    else:
+      raise ValueError(f'Invalid entity type {entity_type}')
 
 # Z3 User Constants
 internal_traits = z3.Function(
@@ -326,10 +357,11 @@ def regex_to_z3_expr(regex : sre_parse.SubPattern) -> z3.ReRef:
 # 'owner' : {{external.email}}
 #
 def matches_value(
-    labels  : z3.FuncDeclRef,
-    key     : z3.SeqRef,
-    value   : str
+    labels : z3.FuncDeclRef,
+    key    : z3.SeqRef,
+    value  : str
   ) -> z3.BoolRef:
+  key = z3.StringVal(key)
   constraint = parse_constraint(value)
   # 'key' : '*'
   if isinstance(constraint, AnyValueConstraint):
@@ -391,10 +423,10 @@ def matches_value(
 # 'env' : ['test', 'prod']
 #
 def matches_constraint(
-    labels      : z3.FuncDeclRef,
-    label_keys  : z3.FuncDeclRef,
-    key         : str,
-    value       : typing.Union[str, list[str]]
+    labels     : z3.FuncDeclRef,
+    label_keys : set[str],
+    key        : str,
+    value      : typing.Union[str, list[str]]
   ) -> z3.BoolRef:
   logging.debug(f'Compiling {key} : {value} constraint')
   if '*' == key:
@@ -403,11 +435,11 @@ def matches_constraint(
     else:
       raise ValueError(f'Constraint of type \'*\' : {value} is not valid')
 
-  key = z3.StringVal(key)
+  label_keys_fun = lambda key: z3.Or([key == k for k in label_keys])
   if isinstance(value, list):
-    return z3.And(label_keys(key), z3.Or([matches_value(labels, key, v) for v in value]))
+    return z3.And(label_keys_fun(key), z3.Or([matches_value(labels, key, v) for v in value]))
   else:
-    return z3.And(label_keys(key), matches_value(labels, key, value))
+    return z3.And(label_keys_fun(key), matches_value(labels, key, value))
   
 
 # Constructs an expression evaluating to whether a given set of label
@@ -420,13 +452,13 @@ def matches_constraint(
 # sub-constraints should be combined (conjunction or disjunction).
 #
 def matches_constraints(
-    constraint_type : str,
-    labels          : z3.FuncDeclRef,
-    label_keys      : z3.FuncDeclRef,
+    state           : RAState,
+    entity_type     : EntityType,
     constraints     : dict[str, typing.Union[str, list[str]]],
-    constraint_fold : typing.Callable
+    constraint_fold : typing.Callable,
   ) -> z3.BoolRef:
-  logging.debug(f'Compiling {constraint_type} constraints')
+  labels, label_keys = state.labels_and_keys(entity_type)
+  logging.debug(f'Existing keys for {entity_type.value}: {label_keys}')
   return constraint_fold([
     matches_constraint(labels, label_keys, key, value)
     for key, value in constraints.items()
@@ -447,13 +479,14 @@ def matches_constraints(
 # sub-constraints should be combined (conjunction or disjunction).
 #
 def matches_constraint_group(
-    group : dict[str, dict[str, typing.Union[str, list[str]]]],
-    constraint_fold : typing.Callable
+    state           : RAState,
+    group           : dict[str, dict[str, typing.Union[str, list[str]]]],
+    constraint_fold : typing.Callable,
   ) -> z3.BoolRef:
   return z3.Or([
-    constraint_type in group
-    and matches_constraints(constraint_type, labels, label_keys, group[constraint_type], constraint_fold)
-    for constraint_type, (labels, label_keys) in entity_types.items()
+    entity_type.value in group
+    and matches_constraints(state, entity_type, group[entity_type.value], constraint_fold)
+    for entity_type in ENTITY_TYPES
   ])
 
 # Constructs an expression evaluating to whether a given role
@@ -470,14 +503,17 @@ def matches_constraint_group(
 #    node_labels:
 #      'env' : 'prod'
 #
-def allows(role : typing.Any) -> z3.BoolRef:
+def allows(
+    state : RAState,
+    role  : typing.Any
+  ) -> z3.BoolRef:
   role_name = role['metadata']['name']
   logging.debug(f'Compiling role template {role_name}')
   spec = role['spec']
   logging.debug('Compiling allow constraints')
-  allow_expr = 'allow' in spec and matches_constraint_group(spec['allow'], z3.And)
+  allow_expr = 'allow' in spec and matches_constraint_group(state, spec['allow'], z3.And)
   logging.debug('Compiling deny constraints')
-  deny_expr = 'deny' in spec and matches_constraint_group(spec['deny'], z3.Or)
+  deny_expr = 'deny' in spec and matches_constraint_group(state, spec['deny'], z3.Or)
   return z3.And(allow_expr, z3.Not(deny_expr))
 
 # Determines whether the given role is a role template, filled in by user traits.
@@ -485,13 +521,13 @@ def is_role_template(role) -> bool:
   spec = role['spec']
   if 'allow' in spec:
     allow = spec['allow']
-    groups = [allow[constraint_type].values() for constraint_type in entity_types.keys() if constraint_type in allow]
+    groups = [allow[entity_type.value].values() for entity_type in ENTITY_TYPES if entity_type.value in allow]
     if any([requires_user_traits(value) for values in groups for value in values]):
       return True
 
   if 'deny' in spec:
     deny = spec['deny']
-    groups = [deny[constraint_type] for constraint_type in entity_types.keys() if constraint_type in deny]
+    groups = [deny[entity_type.value] for entity_type in ENTITY_TYPES if entity_type.value in deny]
     if any([requires_user_traits(value) for values in groups for value in values]):
       return True
 
@@ -501,43 +537,22 @@ def is_role_template(role) -> bool:
 # form understood by Z3 that can be checked against a compiled set of role
 # constraints.
 def labels_as_z3_map(
+    state : RAState,
     concrete_labels : typing.Optional[dict[str, str]],
-    entity_type : EntityType
-  ) -> z3.BoolRef:
-  logging.debug(f'Compiling labels {concrete_labels} of type {entity_type.name}')
-  # Specify unused entity types have no label values
-  others_unused = z3.BoolVal(True)
-  for other_entity_type in other_entity_types(entity_type):
-    _, other_label_keys = other_entity_type.value
-    any_key = z3.String(f'{other_entity_type.name}_any_key')
-    other_unused = z3.ForAll(any_key, z3.Not(other_label_keys(any_key)))
-    others_unused = z3.And(others_unused, other_unused)
-    
-  labels, label_keys = entity_type.value
-  # It isn't enough to specify which values are in the set, we must also
-  # specify which values are *not* in the set. Otherwise Z3 finds the
-  # trivial set model [else -> True] which contains all string values.
-  if concrete_labels is not None and any(concrete_labels):
-    included = z3.And([label_keys(z3.StringVal(key)) for key in concrete_labels.keys()])
-    excluded_key = z3.String('excluded_key')
-    is_excluded_key = z3.And([excluded_key != z3.StringVal(key) for key in concrete_labels.keys()])
-    excluded = z3.Implies(is_excluded_key, z3.Not(label_keys(excluded_key)))
-    restrictive_key_set = z3.And(included, z3.ForAll(excluded_key, excluded))
-    return z3.And(others_unused, restrictive_key_set, z3.And([
-      labels(z3.StringVal(key)) == z3.StringVal(value)
-      for key, value in concrete_labels.items()
-    ]))
+    entity_type     : EntityType
+  ) -> tuple[z3.BoolRef, RAState]:
+  logging.debug(f'Compiling labels {concrete_labels} for {entity_type.value}')
+  if concrete_labels is not None:
+    return z3.And([state.set(entity_type, key, value) for key, value in concrete_labels.items()])
   else:
-    any_key = z3.String(f'{entity_type.name}_any_key')
-    this_unused = z3.ForAll(any_key, z3.Not(label_keys(any_key)))
-    return z3.And(others_unused, this_unused)
+    return True
 
 # Compiles the traits of a given internal or external user into a form
 # understood by Z3 that can be checked against a compiled set of role constraints.
 def traits_as_z3_map(
     concrete_traits : typing.Optional[dict[str, list[str]]],
     user_type : UserType
-  ) -> typing.Optional[z3.BoolRef]:
+  ) -> z3.BoolRef:
   logging.debug(f'Compiling user traits {concrete_traits} of type {user_type.name}')
 
   # Specify unused user type has no trait values
@@ -586,7 +601,8 @@ def role_allows_user_access_to_entity(
     entity_type   : EntityType,
     solver        : z3.Solver = z3.Solver()
   ) -> bool:
+  state = RAState()
   solver.add(traits_as_z3_map(user_traits, user_type))
-  solver.add(labels_as_z3_map(entity_labels, entity_type))
-  solver.add(allows(role))
+  solver.add(labels_as_z3_map(state, entity_labels, entity_type))
+  solver.add(allows(state, role))
   return z3.sat == solver.check()
